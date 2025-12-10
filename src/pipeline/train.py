@@ -79,6 +79,7 @@ def main():
     pca_reducer = PCAFeatureReducer(n_components=200)
     X_train_reduced = pca_reducer.fit_transform(X_train)
     X_test_reduced = pca_reducer.transform(X_test)
+    pca_reducer.save("models/pca_reducer.pkl")
     logger.info(f"Reduced features - Train: {X_train_reduced.shape}, Test: {X_test_reduced.shape}")
 
     # Train SVM Model:
@@ -99,7 +100,7 @@ def main():
     logger.info(f"Train Accuracy: {train_accuracy*100:.2f}%")
     logger.info(f"Test Accuracy: {svm_test_accuracy*100:.2f}%")
 
-    # model.save("models/svm.pkl")
+    model.save("models/svm.pkl")
     
     # Train KNN Model with tuning
     logger.info("\n=== Training KNN Model ===")
