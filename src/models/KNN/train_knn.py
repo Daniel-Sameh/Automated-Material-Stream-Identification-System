@@ -4,34 +4,29 @@ from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 
 
 class KnnModel:
-    def __init__(self, n_neighbors=5,threshold=None):
+    def __init__(self, n_neighbors=5,threshold=None, metric='manhatten'):
         self.n_neighbors=n_neighbors
         self.threshold=threshold
-        self.model=None
+        self.metric=metric
+        self.model = KNeighborsClassifier(n_neighbors=n_neighbors, metric=metric, weights='distance')
+        self.nn = NearestNeighbors(n_neighbors=n_neighbors)
 
     def train(self, X_train, y_train):
-        self.model=KNeighborsClassifier(n_neighbors=self.n_neighbors)
         self.model.fit(X_train, y_train)
-        nn=NearestNeighbors(n_neighbors=self.n_neighbors)
-        nn.fit(self.model._fit_X)
-        distances=nn.kneighbors(X_train)
+        self.nn.fit(X_train)
+
+        distances, _=self.nn.kneighbors(X_train)
         avg_distances=distances.mean(axis=1)
         self.threshold=np.percentile(avg_distances,95)
 
     def predict(self, X):
-        distances, neighbors=self.model.kneighbors(X, n_neighbors=self.n_neighbors)
+        distances, _=self.nn.kneighbors(X)
         predictions=self.model.predict(X)
-        if self.threshold is None:
-            return predictions
-        else:
-            avg_distance=distances.mean(axis=1)
-            predictions_with_unknown=[]
-            for i, pred in enumerate(predictions):
-                if avg_distance[i] > self.threshold:
-                    predictions_with_unknown.append("unknown")
-                else:
-                    predictions_with_unknown.append(pred)
-            return np.array(predictions_with_unknown)
+        if self.threshold is not None:
+            avg_distance = distances.mean(axis=1)
+            predictions = np.where(avg_distance > self.threshold, -1, predictions)
+        
+        return predictions
 
 
     def save(self, path):
@@ -43,4 +38,11 @@ class KnnModel:
         self.threshold=data.get('threshold')
 
     def score(self, X, y):
-        return np.mean(self.predict(X) == y)
+        predictions = self.predict(X)
+        
+        # Filter out unknown predictions
+        mask = predictions != -1
+        if np.sum(mask) == 0:
+            return 0.0
+        
+        return np.mean(predictions[mask] == np.array(y)[mask])
