@@ -2,10 +2,29 @@ import cv2
 import numpy as np
 from skimage.feature import hog, local_binary_pattern, graycomatrix, graycoprops
 from tqdm import tqdm
+import torch
+import torchvision.models as models
+from torchvision import transforms
+from PIL import Image
 
 class FeatureExtractor:
     def __init__(self, image_size=128):
         self.image_size = image_size
+        self.resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+        self.resnet = torch.nn.Sequential(*list(self.resnet.children())[:-1])
+        self.resnet.eval()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.resnet = self.resnet.to(self.device)
+        print(f"Model loaded on {self.device}")
+
+        # ImageNet normalization
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                std=[0.229, 0.224, 0.225]),
+        ])
     
     def extract(self, images):
         features = []
@@ -23,28 +42,57 @@ class FeatureExtractor:
         return np.array(features)
     
     def extract_features_from_image(self, img):
-        img = cv2.resize(img, (self.image_size, self.image_size))
+        # img = cv2.resize(img, (self.image_size, self.image_size))
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
+        deep_feat = self.extract_deep_features(img_rgb)
+        
+        img = cv2.resize(img, (self.image_size, self.image_size))
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         # Extract comprehensive features
-        hog_features = self.hog_extractor(img_rgb)
+        # hog_features = self.hog_extractor(img_rgb)
         lbp_features = self.lbp_extractor(img_rgb)
         color_features = self.color_histogram(img_rgb)
-        texture_features = self.glcm_features(img_rgb) 
+        # texture_features = self.glcm_features(img_rgb)
         edge_features = self.edge_features(img_rgb)
-        shape_features = self.shape_features(img_rgb) 
+        # shape_features = self.shape_features(img_rgb)
         
+        specular_features = self.specular_features(img_rgb)  
+        surface_features = self.surface_properties(img_rgb) 
+        frequency_features = self.frequency_features(img_rgb)
+        fractal_features = self.fractal_dimension(img_rgb)
+
         # Concatenate all features
         combined = np.concatenate([
-            hog_features,
+            deep_feat,
+            # hog_features,
             lbp_features,
             color_features,
             # texture_features,
-            # edge_features,
-            # shape_features
+            edge_features,
+            # shape_features,
+            specular_features,
+            surface_features,
+            frequency_features,
+            fractal_features
         ])
         
         return combined
+    
+    def extract_deep_features(self, img):
+        """Extract features using pretrained ResNet50"""
+        
+        # Convert to PIL Image for transforms
+        img_pil = Image.fromarray(img)
+        
+        # Apply transforms
+        img_tensor = self.transform(img_pil).unsqueeze(0).to(self.device)
+        
+        # Extract features
+        with torch.no_grad():
+            features = self.resnet(img_tensor).squeeze().cpu().numpy()
+        
+        return features  # 2048 features from ResNet50
     
     def hog_extractor(self, img):
         """HOG features - shape and edge patterns"""
@@ -202,4 +250,125 @@ class FeatureExtractor:
             features = np.zeros(9)
         
         return np.array(features)
+    
+    def specular_features(self, img):
+        """Detect shininess/reflectivity - distinguishes glass/metal from cardboard/paper"""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # Detect bright spots (specular highlights)
+        _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        specular_ratio = np.sum(bright_mask > 0) / bright_mask.size
+        
+        # Local variance - high for shiny materials (glass/metal)
+        kernel_size = 5
+        mean_kernel = np.ones((kernel_size, kernel_size)) / (kernel_size ** 2)
+        local_mean = cv2.filter2D(gray.astype(float), -1, mean_kernel)
+        local_variance = cv2.filter2D((gray - local_mean) ** 2, -1, mean_kernel)
+        
+        # Contrast distribution - shiny materials have high local contrast
+        high_contrast_ratio = np.sum(local_variance > 30) / local_variance.size
+        
+        # Intensity range - reflective materials have wider range
+        intensity_range = np.max(gray) - np.min(gray)
+        
+        return np.array([
+            specular_ratio,
+            np.mean(local_variance),
+            np.std(local_variance),
+            high_contrast_ratio,
+            intensity_range / 255.0
+        ])
+    
+    def frequency_features(self, img):
+        """FFT features - periodic textures (cardboard fibers, plastic patterns)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # FFT
+        f_transform = np.fft.fft2(gray)
+        f_shift = np.fft.fftshift(f_transform)
+        magnitude = np.abs(f_shift)
+        
+        # Radial frequency distribution
+        center = (magnitude.shape[0] // 2, magnitude.shape[1] // 2)
+        y, x = np.ogrid[:magnitude.shape[0], :magnitude.shape[1]]
+        radius = np.sqrt((x - center[1])**2 + (y - center[0])**2)
+        
+        # Energy in different frequency bands
+        low_freq = np.sum(magnitude[radius < 20]) / np.sum(magnitude)
+        mid_freq = np.sum(magnitude[(radius >= 20) & (radius < 50)]) / np.sum(magnitude)
+        high_freq = np.sum(magnitude[radius >= 50]) / np.sum(magnitude)
+        
+        # Frequency concentration (smooth vs textured)
+        freq_std = np.std(magnitude)
+        
+        return np.array([low_freq, mid_freq, high_freq, freq_std])
+    
+    def fractal_dimension(self, img):
+        """Fractal dimension - roughness (high for cardboard, low for glass/metal)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # Box-counting method (simplified)
+        def boxcount(img, k):
+            s = np.add.reduceat(
+                np.add.reduceat(img, np.arange(0, img.shape[0], k), axis=0),
+                np.arange(0, img.shape[1], k), axis=1)
+            return len(np.where((s > 0) & (s < 255 * k * k))[0])
+        
+        # Calculate at multiple scales
+        scales = [2, 4, 8, 16]
+        counts = [boxcount(gray, s) for s in scales]
+        counts = np.array(counts)
+        
+        # Fit line to log-log plot
+        coeffs = np.polyfit(np.log(scales), np.log(counts + 1), 1)
+        fractal_dim = -coeffs[0]  # Slope
+        
+        return np.array([fractal_dim])
+    
+    def transparency_features(self, img):
+        """Detect see-through regions - glass/clear plastic"""
+        # Look for low saturation with visible background patterns
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        
+        # Low saturation + high value = potential transparency
+        transparent_mask = (saturation < 50) & (value > 100)
+        transparent_ratio = np.sum(transparent_mask) / transparent_mask.size
+        
+        # Edge visibility through transparent areas
+        edges = cv2.Canny(img, 50, 150)
+        edges_in_transparent = np.sum(edges[transparent_mask] > 0) / (np.sum(transparent_mask) + 1)
+        
+        return np.array([
+            transparent_ratio,
+            edges_in_transparent,
+            np.mean(saturation)
+        ])
+    
+    def surface_properties(self, img):
+        """Estimate surface smoothness - glass/metal smooth, cardboard rough"""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # Laplacian variance - smoothness indicator
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        lap_variance = laplacian.var()
+        
+        # Local standard deviation distribution
+        kernel = np.ones((9, 9)) / 81
+        local_std = cv2.filter2D((gray - cv2.filter2D(gray.astype(float), -1, kernel))**2, -1, kernel)
+        
+        # Smooth areas have low local std
+        smooth_ratio = np.sum(local_std < 100) / local_std.size
+        
+        # Surface uniformity
+        uniformity = 1.0 / (1.0 + lap_variance)
+        
+        return np.array([
+            lap_variance,
+            smooth_ratio,
+            uniformity,
+            np.mean(local_std),
+            np.percentile(local_std, 90)
+        ])
 
