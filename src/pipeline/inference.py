@@ -1,9 +1,11 @@
-import joblib
+# src/pipeline/inference.py
 import os
+import joblib
+import numpy as np
+
 from src.models.SVM.train_svm import SvmModel
 from src.models.KNN.train_knn import KnnModel
 from src.features.feature_extraction import FeatureExtractor
-import numpy as np
 from src.config.settings import Settings
 from src.pipeline.preprocess import preprocess_for_inference
 
@@ -11,49 +13,70 @@ from src.pipeline.preprocess import preprocess_for_inference
 classes = Settings().classes
 feature_extractor = FeatureExtractor()
 
-# Prefer a saved sklearn Pipeline (contains scaler+pca+clf)
-pipeline_path = None
-for candidate in ("models/svm_pipeline.pkl", "models/svm.pkl"):
-    if os.path.exists(candidate):
-        pipeline_path = candidate
-        break
-
-use_pipeline = False
+# -----------------------------
+# Preferred: open-set artifact (pipeline + threshold)
+# -----------------------------
+artifact = None
 pipeline = None
 pipeline_threshold = None
-svm_wrapper = None
-if pipeline_path:
+unknown_label = -1
+
+open_set_path = "models/svm_open_set.pkl"
+if os.path.exists(open_set_path):
     try:
-        loaded = joblib.load(pipeline_path)
-        # If loaded is a SvmModel wrapper, prefer that
-        if isinstance(loaded, SvmModel):
-            svm_wrapper = loaded
-            print(f"Loaded SvmModel wrapper from {pipeline_path}")
-        # artifact may be a dict {'pipeline': Pipeline, 'threshold': float}
-        elif isinstance(loaded, dict) and 'pipeline' in loaded:
-            pipeline = loaded['pipeline']
-            pipeline_threshold = loaded.get('threshold', None)
-            use_pipeline = True
-            print(f"Loaded pipeline artifact from {pipeline_path} (threshold={pipeline_threshold})")
-        else:
-            # assume it's a raw sklearn Pipeline
-            pipeline = loaded
-            pipeline_threshold = None
-            use_pipeline = True
-            print(f"Loaded pipeline from {pipeline_path}")
+        artifact = joblib.load(open_set_path)
+        # expected keys: pipeline, threshold, unknown_label
+        pipeline = artifact.get("pipeline", None)
+        pipeline_threshold = artifact.get("threshold", None)
+        unknown_label = artifact.get("unknown_label", -1)
+        print(f"Loaded open-set artifact from {open_set_path} (threshold={pipeline_threshold}, unknown_label={unknown_label})")
     except Exception:
+        artifact = None
         pipeline = None
         pipeline_threshold = None
-        use_pipeline = False
 
-# Fallback: legacy files
+# -----------------------------
+# Secondary: closed-set pipeline (no threshold)
+# -----------------------------
+if pipeline is None:
+    pipeline_path = None
+    for candidate in ("models/svm_pipeline.pkl", "models/svm.pkl"):
+        if os.path.exists(candidate):
+            pipeline_path = candidate
+            break
+
+    if pipeline_path:
+        try:
+            loaded = joblib.load(pipeline_path)
+            # Sometimes older code may have saved dicts {'pipeline':..., 'threshold':...}
+            if isinstance(loaded, dict) and "pipeline" in loaded:
+                pipeline = loaded["pipeline"]
+                pipeline_threshold = loaded.get("threshold", None)
+                unknown_label = loaded.get("unknown_label", -1)
+                print(f"Loaded pipeline artifact from {pipeline_path} (threshold={pipeline_threshold})")
+            else:
+                pipeline = loaded
+                pipeline_threshold = None
+                print(f"Loaded pipeline from {pipeline_path}")
+        except Exception:
+            pipeline = None
+            pipeline_threshold = None
+
+# -----------------------------
+# Legacy fallback: scaler+pca+best.pkl with SvmModel/KnnModel
+# -----------------------------
 scaler = None
 pca = None
 model = None
 best_model_name = None
-if not use_pipeline:
-    # legacy loading (scaler+pca+model)
-    if os.path.exists("models/scaler.pkl") and os.path.exists("models/pca_reducer.pkl") and os.path.exists("models/best.pkl"):
+svm_wrapper = None
+
+if pipeline is None:
+    if (
+        os.path.exists("models/scaler.pkl")
+        and os.path.exists("models/pca_reducer.pkl")
+        and os.path.exists("models/best.pkl")
+    ):
         scaler = joblib.load("models/scaler.pkl")
         pca = joblib.load("models/pca_reducer.pkl")["pca"]
         best_model = joblib.load("models/best.pkl")
@@ -62,127 +85,102 @@ if not use_pipeline:
         if best_model_name == "svm":
             model = SvmModel()
             model.load("models/svm.pkl")
-            print("Loaded legacy SVM model.")
+            svm_wrapper = model
+            print("Loaded legacy SvmModel.")
         else:
             model = KnnModel()
             model.load("models/knn.pkl")
             print("Loaded legacy KNN model.")
 
 
+def _max_margin(scores: np.ndarray) -> float:
+    """max score compatible with binary/multiclass SVM decision_function outputs."""
+    scores = np.asarray(scores)
+    if scores.ndim == 1:
+        return float(np.abs(scores)[0])
+    return float(np.max(scores, axis=1)[0])
+
+
 def Predict(image):
     image = preprocess_for_inference(image)
 
-    # 1. Feature extraction
-    features = feature_extractor.extract([image])
+    # 1) Feature extraction
+    feats = feature_extractor.extract([image])  # (1, D)
 
-    # If we loaded a SvmModel wrapper, use its scaler/pca then its predict API
-    if svm_wrapper is not None:
-        # expect scaler and pca attached to the wrapper
-        try:
-            X = features
-            if hasattr(svm_wrapper, 'scaler') and svm_wrapper.scaler is not None:
-                X = svm_wrapper.scaler.transform(X)
-            if hasattr(svm_wrapper, 'pca') and svm_wrapper.pca is not None:
-                X = svm_wrapper.pca.transform(X)
+    # 2) Pipeline path (preferred)
+    if pipeline is not None:
+        pred_closed = pipeline.predict(feats)[0]
 
-            preds = svm_wrapper.predict_with_confidence(X)
-            # predict_with_confidence returns (preds, scores)
-            if isinstance(preds, tuple) and len(preds) == 2:
-                pred_arr, scores = preds
-                pred = pred_arr[0]
-                score = scores[0]
-            else:
-                pred = preds[0]
-                score = 0.0
-
-            if pred == -1:
-                return "unknown", 0.0
-
-            label = classes[int(pred)]
-            # convert raw score to percentage-like value
-            confidence = 100 * (abs(score) / (abs(score) + 1e-6)) if score is not None else 0.0
-            return label, float(confidence)
-        except Exception:
-            # fallback to pipeline path
-            pass
-
-    # If we loaded an sklearn pipeline, feed the extracted features into it
-    if use_pipeline and pipeline is not None:
-        # pipeline expects a 2D array
-        preds = pipeline.predict(features)
-
-        # Compute decision-function score via pipeline (delegates to classifier)
-        confidence = 0.0
         raw_score = None
         try:
-            # pipeline.decision_function will call the estimator's decision_function
-            scores = pipeline.decision_function(features)
-            if scores is not None:
-                if np.ndim(scores) == 1:
-                    raw_score = np.abs(scores)[0]
-                else:
-                    raw_score = np.max(scores, axis=1)[0]
-                confidence = 100 * (raw_score / (np.abs(raw_score) + 1e-6))
+            if hasattr(pipeline, "decision_function"):
+                scores = pipeline.decision_function(feats)
+                raw_score = _max_margin(scores)
         except Exception:
             raw_score = None
+
+        # Apply stored threshold if available (open-set behavior)
+        if pipeline_threshold is not None and raw_score is not None:
+            if raw_score < float(pipeline_threshold):
+                return "unknown", 0.0
+
+        # If model itself outputs unknown label (in case you ever use a rejecting clf)
+        if pred_closed == unknown_label:
+            return "unknown", 0.0
+
+        label = classes[int(pred_closed)]
+
+        # confidence: simple, monotonic with margin; NOT a probability
+        if raw_score is None:
+            confidence = 0.0
+        elif pipeline_threshold is not None:
+            # 0% at threshold, increases above it, capped at 100
+            confidence = (raw_score - float(pipeline_threshold)) / (abs(float(pipeline_threshold)) + 1e-6)
+            confidence = float(np.clip(confidence, 0.0, 1.0) * 100.0)
+        else:
+            confidence = float((raw_score / (abs(raw_score) + 1e-6)) * 100.0)
+
+        return label, float(confidence)
+
+    # 3) Legacy wrapper path
+    if scaler is None or pca is None or model is None:
+        raise RuntimeError("No model available for inference. Train and save models/svm_open_set.pkl or a pipeline first.")
+
+    feats = scaler.transform(feats)
+    feats = pca.transform(feats)
+
+    if best_model_name == "svm" and svm_wrapper is not None:
+        # svm_wrapper.predict returns -1 for unknown if it has its own threshold
+        pred = svm_wrapper.predict(feats)[0]
+
+        if pred == -1:
+            return "unknown", 0.0
+
+        # decision-function based confidence (not calibrated)
+        try:
+            scores = svm_wrapper.model.decision_function(feats)
+            raw_score = _max_margin(scores)
+            confidence = float((raw_score / (abs(raw_score) + 1e-6)) * 100.0)
+        except Exception:
             confidence = 0.0
 
-        pred = preds[0]
+        return classes[int(pred)], confidence
 
-        # If a threshold was stored with the pipeline, use it to reject unknowns
-        if pipeline_threshold is not None and raw_score is not None:
-            try:
-                if raw_score < pipeline_threshold:
-                    return "unknown", 0.0
-            except Exception:
-                pass
-
-        if pred == -1:
-            return "unknown", 0.0
-
-        label = classes[int(pred)]
-        return label, float(abs(confidence))
-
-    # Legacy path: apply scaler + pca + model
-    if scaler is None or pca is None or model is None:
-        raise RuntimeError("No model available for inference. Train and save a pipeline first.")
-
-    features = scaler.transform(features)
-    X_reduced = pca.transform(features)
-
-    if best_model_name == "svm":
-        pred = model.predict(X_reduced)[0]
-
-        # confidence from decision function
-        scores = model.model.decision_function(X_reduced)
-        confidence = np.max(scores)
-
-        if pred == -1:
-            return "unknown", 0.0
-
-        label = classes[pred]
-        confidence = 100 * (confidence / (np.abs(confidence) + 1e-6))
-
-    else:  # KNN
-        pred = model.predict(X_reduced)[0]
-        confidence = 0.0
-
-        if pred == -1:
-            return "unknown", 0.0
-
-        label = classes[pred]
-
-    return label, float(abs(confidence))
+    # KNN legacy
+    pred = model.predict(feats)[0]
+    if pred == -1:
+        return "unknown", 0.0
+    return classes[int(pred)], 0.0
 
 
 if __name__ == "__main__":
     import cv2
-    import os
-    # Predict all images in test/
+
     test_dir = "test/"
-    for filename in os.listdir(test_dir):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            image_path = os.path.join(test_dir, filename)
-            image = cv2.imread(image_path)
-            print(f"Image: {filename}")
-            print(Predict(image))
+    if os.path.isdir(test_dir):
+        for filename in os.listdir(test_dir):
+            if filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                image_path = os.path.join(test_dir, filename)
+                image = cv2.imread(image_path)
+                print(f"Image: {filename}")
+                print(Predict(image))
