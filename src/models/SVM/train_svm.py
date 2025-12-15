@@ -24,17 +24,12 @@ class SvmModel:
             kernel=self.kernel, 
             C=self.C, 
             decision_function_shape='ovr',  # One-vs-Rest for better outlier detection
-            gamma='scale', 
+            gamma=self.gamma, 
             class_weight='balanced'
         )
         
-        if self.logger:
-            self.logger.info("Fitting the model...")
         self.model.fit(X_train, y_train)
         
-        if self.logger:
-            self.logger.info("Model training completed.")
-            self.logger.info("Calculating decision function threshold for unknown rejection...")
         
         # Get decision function scores for training data
         decision_scores = self.model.decision_function(X_train)
@@ -46,7 +41,7 @@ class SvmModel:
             max_scores = np.max(decision_scores, axis=1)
         
         # Set threshold at 5th percentile - samples below this are "far" from all classes
-        self.threshold = np.percentile(max_scores, 1)
+        self.threshold = np.percentile(max_scores, 5)
         
         if self.logger:
             self.logger.info(f"SVM trained with kernel={self.kernel}, C={self.C}")
