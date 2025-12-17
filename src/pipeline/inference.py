@@ -21,7 +21,7 @@ pipeline = None
 pipeline_threshold = None
 unknown_label = -1
 
-open_set_path = "models/svm_open_set.pkl"
+open_set_path = "models/knn_open_set.pkl"
 if os.path.exists(open_set_path):
     try:
         artifact = joblib.load(open_set_path)
@@ -40,7 +40,7 @@ if os.path.exists(open_set_path):
 # -----------------------------
 if pipeline is None:
     pipeline_path = None
-    for candidate in ("models/svm_pipeline.pkl", "models/svm.pkl"):
+    for candidate in ("models/knn_pipeline.pkl", "models/knn.pkl"):
         if os.path.exists(candidate):
             pipeline_path = candidate
             break
