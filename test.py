@@ -38,10 +38,10 @@ def predict(dataFilePath, bestModelPath):
         if "pipeline" in model_data:
             if hasattr(model_data["pipeline"].named_steps.get("clf"), "support_vectors_"):
                 model = SvmModel()
-                print("Warning: Model type could not be determined from 'best' key. Defaulting to SVM.")
+                print("Loaded SVM.")
             else:
                 model = KnnModel()
-                print("Warning: Model type could not be determined from 'best' key. Defaulting to KNN.")
+                print("Loaded KNN.")
             model.load(bestModelPath)
     
     # Process images and predict

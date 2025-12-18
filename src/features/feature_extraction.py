@@ -54,13 +54,13 @@ class FeatureExtractor:
         lbp_features = self.lbp_extractor(img_rgb)
         color_features = self.color_histogram(img_rgb)
         # texture_features = self.glcm_features(img_rgb)
-        edge_features = self.edge_features(img_rgb)
+        # edge_features = self.edge_features(img_rgb)
         # shape_features = self.shape_features(img_rgb)
         
-        specular_features = self.specular_features(img_rgb)  
+        # specular_features = self.specular_features(img_rgb)  
         surface_features = self.surface_properties(img_rgb) 
-        frequency_features = self.frequency_features(img_rgb)
-        fractal_features = self.fractal_dimension(img_rgb)
+        # frequency_features = self.frequency_features(img_rgb)
+        # fractal_features = self.fractal_dimension(img_rgb)
 
         # Concatenate all features
         combined = np.concatenate([
@@ -250,102 +250,7 @@ class FeatureExtractor:
             features = np.zeros(9)
         
         return np.array(features)
-    
-    def specular_features(self, img):
-        """Detect shininess/reflectivity - distinguishes glass/metal from cardboard/paper"""
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         
-        # Detect bright spots (specular highlights)
-        _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        specular_ratio = np.sum(bright_mask > 0) / bright_mask.size
-        
-        # Local variance - high for shiny materials (glass/metal)
-        kernel_size = 5
-        mean_kernel = np.ones((kernel_size, kernel_size)) / (kernel_size ** 2)
-        local_mean = cv2.filter2D(gray.astype(float), -1, mean_kernel)
-        local_variance = cv2.filter2D((gray - local_mean) ** 2, -1, mean_kernel)
-        
-        # Contrast distribution - shiny materials have high local contrast
-        high_contrast_ratio = np.sum(local_variance > 30) / local_variance.size
-        
-        # Intensity range - reflective materials have wider range
-        intensity_range = np.max(gray) - np.min(gray)
-        
-        return np.array([
-            specular_ratio,
-            np.mean(local_variance),
-            np.std(local_variance),
-            high_contrast_ratio,
-            intensity_range / 255.0
-        ])
-    
-    def frequency_features(self, img):
-        """FFT features - periodic textures (cardboard fibers, plastic patterns)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        
-        # FFT
-        f_transform = np.fft.fft2(gray)
-        f_shift = np.fft.fftshift(f_transform)
-        magnitude = np.abs(f_shift)
-        
-        # Radial frequency distribution
-        center = (magnitude.shape[0] // 2, magnitude.shape[1] // 2)
-        y, x = np.ogrid[:magnitude.shape[0], :magnitude.shape[1]]
-        radius = np.sqrt((x - center[1])**2 + (y - center[0])**2)
-        
-        # Energy in different frequency bands
-        low_freq = np.sum(magnitude[radius < 20]) / np.sum(magnitude)
-        mid_freq = np.sum(magnitude[(radius >= 20) & (radius < 50)]) / np.sum(magnitude)
-        high_freq = np.sum(magnitude[radius >= 50]) / np.sum(magnitude)
-        
-        # Frequency concentration (smooth vs textured)
-        freq_std = np.std(magnitude)
-        
-        return np.array([low_freq, mid_freq, high_freq, freq_std])
-    
-    def fractal_dimension(self, img):
-        """Fractal dimension - roughness (high for cardboard, low for glass/metal)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        
-        # Box-counting method (simplified)
-        def boxcount(img, k):
-            s = np.add.reduceat(
-                np.add.reduceat(img, np.arange(0, img.shape[0], k), axis=0),
-                np.arange(0, img.shape[1], k), axis=1)
-            return len(np.where((s > 0) & (s < 255 * k * k))[0])
-        
-        # Calculate at multiple scales
-        scales = [2, 4, 8, 16]
-        counts = [boxcount(gray, s) for s in scales]
-        counts = np.array(counts)
-        
-        # Fit line to log-log plot
-        coeffs = np.polyfit(np.log(scales), np.log(counts + 1), 1)
-        fractal_dim = -coeffs[0]  # Slope
-        
-        return np.array([fractal_dim])
-    
-    def transparency_features(self, img):
-        """Detect see-through regions - glass/clear plastic"""
-        # Look for low saturation with visible background patterns
-        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-        saturation = hsv[:, :, 1]
-        value = hsv[:, :, 2]
-        
-        # Low saturation + high value = potential transparency
-        transparent_mask = (saturation < 50) & (value > 100)
-        transparent_ratio = np.sum(transparent_mask) / transparent_mask.size
-        
-        # Edge visibility through transparent areas
-        edges = cv2.Canny(img, 50, 150)
-        edges_in_transparent = np.sum(edges[transparent_mask] > 0) / (np.sum(transparent_mask) + 1)
-        
-        return np.array([
-            transparent_ratio,
-            edges_in_transparent,
-            np.mean(saturation)
-        ])
-    
     def surface_properties(self, img):
         """Estimate surface smoothness - glass/metal smooth, cardboard rough"""
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)

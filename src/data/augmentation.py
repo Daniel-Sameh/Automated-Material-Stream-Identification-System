@@ -19,7 +19,7 @@ class Augmentor:
 
         self.transform = transforms.Compose([
             transforms.RandomResizedCrop(
-                 size=384,  # match ResNet crop target better than 128
+                 size=384,
                  scale=(0.6, 1.0),
                  ratio=(0.8, 1.2),
                  antialias=True
@@ -47,7 +47,7 @@ class Augmentor:
     def add_sensor_noise(self, img: Image.Image) -> Image.Image:
         """Simulate sensor noise in low light."""
         arr = np.array(img).astype(np.float32)
-        sigma = random.uniform(2.0, 12.0)  # tune if needed
+        sigma = random.uniform(2.0, 12.0)
         noise = np.random.normal(0, sigma, arr.shape).astype(np.float32)
         arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
         return Image.fromarray(arr)

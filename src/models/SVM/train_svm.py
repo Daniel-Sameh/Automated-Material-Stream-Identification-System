@@ -26,11 +26,10 @@ class SvmModel:
         self.unknown_label = unknown_label
 
     def train(self, X_fit, y_fit, X_valid):
-        # Closed-set pipeline + GridSearchCV (No rejection here)
         self.pipeline = Pipeline([
             ("scaler", StandardScaler()),
             ("pca", PCA()),
-            ("clf", SVC(class_weight="balanced")) # closed-set classifier
+            ("clf", SVC(class_weight="balanced"))
         ])
 
         param_grid = {
@@ -50,14 +49,14 @@ class SvmModel:
         self.logger.info(f"CV best score: {grid.best_score_}")
 
         # Calibrate Unknown threshold on validation set (original distribution)
-        # threshold is chosen to reject only a small % of KNOWN samples.
+        # threshold is chosen to reject only a small % of known samples.
         calib_scores = best_pipeline.decision_function(X_valid)
         if calib_scores.ndim == 1:
             calib_max = np.abs(calib_scores)
         else:
             calib_max = np.max(calib_scores, axis=1)
 
-        self.unknown_rate = 0.01  # reject ~1% of known validation samples
+        self.unknown_rate = 0.01  # reject 1% of known validation samples
         self.threshold = np.percentile(calib_max, self.unknown_rate * 100.0)
 
         self.logger.info(f"Chosen threshold: {self.threshold:.6f}")
