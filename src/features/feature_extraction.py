@@ -72,7 +72,7 @@ class FeatureExtractor:
             # edge_features,
             # shape_features,
             # specular_features,
-            surface_features,
+            # surface_features,
             # frequency_features,
             # fractal_features
         ])
