@@ -50,7 +50,7 @@ class FeatureExtractor:
         img = cv2.resize(img, (self.image_size, self.image_size))
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         # Extract comprehensive features
-        # hog_features = self.hog_extractor(img_rgb)
+        hog_features = self.hog_extractor(img_rgb)
         lbp_features = self.lbp_extractor(img_rgb)
         color_features = self.color_histogram(img_rgb)
         # texture_features = self.glcm_features(img_rgb)
@@ -65,16 +65,16 @@ class FeatureExtractor:
         # Concatenate all features
         combined = np.concatenate([
             deep_feat,
-            # hog_features,
+            hog_features,
             lbp_features,
             color_features,
             # texture_features,
-            edge_features,
+            # edge_features,
             # shape_features,
-            specular_features,
+            # specular_features,
             surface_features,
-            frequency_features,
-            fractal_features
+            # frequency_features,
+            # fractal_features
         ])
         
         return combined

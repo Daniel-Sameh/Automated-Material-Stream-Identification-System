@@ -18,12 +18,12 @@ class Augmentor:
             os.makedirs(self.processed_dir)
 
         self.transform = transforms.Compose([
-            # transforms.RandomResizedCrop(
-            #     size=224,  # match ResNet crop target better than 128
-            #     scale=(0.6, 1.0),
-            #     ratio=(0.8, 1.2),
-            #     antialias=True
-            # ),
+            transforms.RandomResizedCrop(
+                 size=384,  # match ResNet crop target better than 128
+                 scale=(0.6, 1.0),
+                 ratio=(0.8, 1.2),
+                 antialias=True
+            ),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply([transforms.RandomPerspective(distortion_scale=0.25, p=1.0)], p=0.35),
             transforms.RandomApply([transforms.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))], p=0.35),

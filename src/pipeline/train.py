@@ -1,14 +1,9 @@
-# train.py  (Fix A: closed-set training + separate calibration threshold)
 from src.config.settings import Settings
 from src.data.augmentation import Augmentor
 from src.data.data_loader import DataLoader
 from src.features.feature_extraction import FeatureExtractor
 
-from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.decomposition import PCA
-from sklearn.svm import SVC  # IMPORTANT: sklearn SVC (NO rejection here)
+from sklearn.model_selection import train_test_split
 from src.models.SVM.train_svm import SvmModel
 from src.models.KNN.train_knn import KnnModel
 
@@ -28,9 +23,7 @@ def main():
     classes = settings.classes
     images, labels = [], []
 
-    # -----------------------------
-    # 1) Load / augment data (to disk) and get (path, label_idx)
-    # -----------------------------
+    # Load/augment data and get (path, label idx)
     processed_root = "data/processed"
     if not os.path.exists(processed_root) or not os.listdir(processed_root):
         augmentor = Augmentor()
@@ -59,9 +52,7 @@ def main():
         images, labels = dataLoader.load_data()
         logger.info(f"Loaded {len(images)} processed images")
 
-    # -----------------------------
-    # 2) Read images + extract features
-    # -----------------------------
+    # Read images + extract features
     imgs = []
     filtered_labels = []
     filtered_paths = []
@@ -82,9 +73,7 @@ def main():
     features = featureExtractor.extract(imgs)
     logger.info(f"Extracted features shape: {features.shape}")
 
-    # -----------------------------
-    # 3) Split ORIGINAL vs AUGMENTED features
-    # -----------------------------
+    # Split original & augmented features
     org_X, org_y = [], []
     aug_X, aug_y = [], []
 
@@ -104,40 +93,53 @@ def main():
     aug_X = np.asarray(aug_X) if len(aug_X) else np.empty((0, features.shape[1]), dtype=features.dtype)
     aug_y = np.asarray(aug_y) if len(aug_y) else np.empty((0,), dtype=org_y.dtype)
 
-    # -----------------------------
-    # 4) Create 3 splits using ORIGINALS ONLY:
-    #    - test: final evaluation (original distribution)
-    #    - calib: choose rejection threshold (original distribution)
-    #    - fit: used for training (we will add AUGMENTED here)
-    # -----------------------------
+    # Create 3 splits using originals:
+    # - test: final evaluation (original distribution)
+    # - valid: choose rejection threshold (original distribution)
+    # - fit: used for training (we will add AUGMENTED here)
     X_train_org, X_test, y_train_org, y_test = train_test_split(
         org_X, org_y, test_size=0.2, random_state=42, stratify=org_y
     )
 
-    X_fit_org, X_calib, y_fit_org, y_calib = train_test_split(
+    X_fit_org, X_valid, y_fit_org, y_valid = train_test_split(
         X_train_org, y_train_org, test_size=0.2, random_state=42, stratify=y_train_org
     )
 
     svm = SvmModel()
     knn = KnnModel()
-    # Add augmented images ONLY to the fit split (not to calib/test)
+
+    # Add augmented images to the fit split (not to valid/test)
     if len(aug_X) > 0:
         X_fit = np.vstack([X_fit_org, aug_X])
         y_fit = np.concatenate([y_fit_org, aug_y])
-        svm.train(X_fit, y_fit, X_calib, X_test, y_test)
-        knn.train(X_fit, y_fit, X_calib, X_test, y_test)
-        svm.save("models/svm_open_set.pkl")
-        knn.save("models/knn_open_set.pkl")
     else:
         X_fit, y_fit = X_fit_org, y_fit_org
-        svm.train(X_fit, y_fit, X_calib, X_test, y_test)
-        knn.train(X_fit, y_fit, X_calib, X_test, y_test)
-        svm.save("models/svm_open_set.pkl")
-        knn.save("models/knn_open_set.pkl")
 
     logger.info(f"Fit set size (with aug): {len(X_fit)}")
-    logger.info(f"Calibration set size (original only): {len(X_calib)}")
+    logger.info(f"validation set size (original only): {len(X_valid)}")
     logger.info(f"Test set size (original only): {len(X_test)}")
+
+    # Train the models
+    svm.train(X_fit, y_fit, X_valid)
+    knn.train(X_fit, y_fit, X_valid)
+    svm.save("models/svm.pkl")
+    knn.save("models/knn.pkl")
+
+    # Evaluate the models & Compare between them
+    acc_svm, acc_svm_with_unknown, _= svm.evaluate(X_test, y_test)
+    acc_knn, acc_knn_with_unknown, _= knn.evaluate(X_test, y_test)
+
+    logger.info(f"SVM accuracy {acc_svm*100:.4f} (no unknowns)")
+    logger.info(f"KNN accuracy {acc_knn*100:.4f} (no unknowns)")
+    logger.info(f"SVM accuracy {acc_svm_with_unknown*100:.4f} (with unknowns)")
+    logger.info(f"KNN accuracy {acc_knn_with_unknown*100:.4f} (with unknowns)")
+
+    if acc_svm_with_unknown >= acc_knn_with_unknown:
+        logger.info("SVM model is better")
+        joblib.dump({"best":"svm"}, "models/bestModel.json")
+    else:
+        logger.info("KNN model is better")
+        joblib.dump({"best":"knn"}, "models/bestModel.json")
 
 
 if __name__ == "__main__":

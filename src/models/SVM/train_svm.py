@@ -13,7 +13,7 @@ import os
 
 
 class SvmModel:
-    def __init__(self, kernel='rbf', C=10, gamma='scale', nu=0.1, pipeline=None, false_reject_rate=0.01, unknown_label=-1):
+    def __init__(self, kernel='rbf', C=10, gamma='scale', nu=0.1, pipeline=None, unknown_rate=0.01, unknown_label=-1):
         # self.kernel = kernel
         # self.C = C
         # self.model = None
@@ -22,17 +22,15 @@ class SvmModel:
         # self.nu = nu
         self.logger = logging.getLogger("SvmModel")
         self.pipeline = pipeline
-        self.false_reject_rate = false_reject_rate
+        self.unknown_rate = unknown_rate
         self.unknown_label = unknown_label
 
-    def train(self, X_fit, y_fit, X_calib, X_test, y_test):
-        # -----------------------------
-        # Closed-set pipeline + GridSearchCV (NO rejection here)
-        # -----------------------------
+    def train(self, X_fit, y_fit, X_valid):
+        # Closed-set pipeline + GridSearchCV (No rejection here)
         self.pipeline = Pipeline([
             ("scaler", StandardScaler()),
             ("pca", PCA()),
-            ("clf", SVC(class_weight="balanced"))  # closed-set classifier
+            ("clf", SVC(class_weight="balanced")) # closed-set classifier
         ])
 
         param_grid = {
@@ -51,51 +49,20 @@ class SvmModel:
         self.logger.info(f"Best params: {grid.best_params_}")
         self.logger.info(f"CV best score: {grid.best_score_}")
 
-        # -----------------------------
-        # Calibrate Unknown threshold on calibration set (original distribution)
-        #    threshold is chosen to reject only a small % of KNOWN samples.
-        # -----------------------------
-        calib_scores = best_pipeline.decision_function(X_calib)
+        # Calibrate Unknown threshold on validation set (original distribution)
+        # threshold is chosen to reject only a small % of KNOWN samples.
+        calib_scores = best_pipeline.decision_function(X_valid)
         if calib_scores.ndim == 1:
             calib_max = np.abs(calib_scores)
         else:
             calib_max = np.max(calib_scores, axis=1)
 
-        self.false_reject_rate = 0.01  # reject ~1% of known calibration samples
-        self.threshold = np.percentile(calib_max, self.false_reject_rate * 100.0)
+        self.unknown_rate = 0.01  # reject ~1% of known validation samples
+        self.threshold = np.percentile(calib_max, self.unknown_rate * 100.0)
 
         self.logger.info(f"Chosen threshold: {self.threshold:.6f}")
-        self.logger.info(f"Calibration unknown rate: {(calib_max < self.threshold).mean():.4f}")
+        self.logger.info(f"validation unknown rate: {(calib_max < self.threshold).mean():.4f}")
 
-        # -----------------------------
-        # Evaluate on test (closed-set and open-set)
-        # -----------------------------
-        test_preds_closed = best_pipeline.predict(X_test)
-        acc_closed = np.mean(test_preds_closed == y_test)
-
-        test_scores = best_pipeline.decision_function(X_test)
-        if test_scores.ndim == 1:
-            test_max = np.abs(test_scores)
-        else:
-            test_max = np.max(test_scores, axis=1)
-
-        test_preds_open = np.where(test_max < self.threshold, -1, test_preds_closed)
-
-        unknown_rate = np.mean(test_preds_open == -1)
-        acc_open = np.mean(test_preds_open == y_test)  # on known-only test, unknown counts as wrong
-
-        self.logger.info("\n=== Final Performance ===")
-        self.logger.info(f"Closed-set Test Accuracy: {acc_closed*100:.2f}%")
-        self.logger.info(f"Open-set  Test Accuracy (unknown counts wrong): {acc_open*100:.2f}%")
-        self.logger.info(f"Test Unknown Rate: {unknown_rate*100:.2f}%")
-
-        # Optional: accuracy on non-rejected samples only (useful diagnostic)
-        known_mask = test_preds_open != -1
-        if np.any(known_mask):
-            acc_when_not_rejected = np.mean(test_preds_open[known_mask] == y_test[known_mask])
-            self.logger.info(f"Accuracy on non-rejected test samples: {acc_when_not_rejected*100:.2f}%")
-        else:
-            self.logger.info("All test samples were rejected as Unknown.")
 
     def predict(self, X):
         """
@@ -104,10 +71,10 @@ class SvmModel:
         if self.pipeline is None:
             raise RuntimeError("Model not loaded/trained: self.pipeline is None")
 
-        pred_closed = self.pipeline.predict(X)
+        predictions = self.pipeline.predict(X)
 
         if self.threshold is None:
-            return pred_closed
+            return predictions
 
         scores = self.pipeline.decision_function(X)
         scores = np.asarray(scores)
@@ -116,8 +83,36 @@ class SvmModel:
         else:
             max_score = np.max(scores, axis=1)
 
-        pred_open = np.where(max_score < self.threshold, self.unknown_label, pred_closed)
-        return pred_open
+        # Normalize to percentage (0-100%)
+        # Higher score = more confident
+        if self.threshold is not None:
+            # Scale relative to threshold: threshold=50%, higher=100%
+            confidence_percentage = np.clip(
+                (max_score / (self.threshold * 2)) * 100, 
+                0, 
+                100
+            )
+            
+            # Apply unknown rejection
+            predictions = np.where(
+                max_score < self.threshold, 
+                self.unknown_label, 
+                predictions
+            )
+            
+            # Set unknown confidence to 0%
+            confidence_percentage = np.where(
+                predictions == self.unknown_label,
+                0.0,
+                confidence_percentage
+            )
+        else:
+            # No threshold: just scale scores to 0-100
+            score_min = max_score.min()
+            score_max = max_score.max()
+            confidence_percentage = ((max_score - score_min) / (score_max - score_min + 1e-8)) * 100
+        
+        return predictions, confidence_percentage
     
     def save(self, path):
         os.makedirs("models", exist_ok=True)
@@ -126,7 +121,7 @@ class SvmModel:
                 "pipeline": self.pipeline,
                 "threshold": float(self.threshold),
                 "unknown_label": -1,
-                "false_reject_rate": float(self.false_reject_rate),
+                "unknown_rate": float(self.unknown_rate),
             },
             path,
         )
@@ -137,7 +132,7 @@ class SvmModel:
         # self.kernel = data['kernel']
         # self.C = data['C']
         self.pipeline = data.get('pipeline', None)
-        self.false_reject_rate = data.get('false_reject_rate', 0.01)
+        self.unknown_rate = data.get('unknown_rate', 0.01)
         self.unknown_label = data.get('unknown_label', -1)
         self.threshold = data.get('threshold', None)
     
@@ -174,12 +169,35 @@ class SvmModel:
         predictions = self.model.predict(X)
         
         if decision_scores.ndim == 1:
-            max_scores = np.abs(decision_scores)
+            confidence_scores = np.abs(decision_scores)
         else:
-            max_scores = np.max(decision_scores, axis=1)
+            confidence_scores = np.max(decision_scores, axis=1)
         
         # Mark unknowns
         if self.threshold is not None:
-            predictions = np.where(max_scores < self.threshold, -1, predictions)
+            predictions = np.where(confidence_scores < self.threshold, -1, predictions)
         
-        return predictions, max_scores
+        return predictions, confidence_scores
+    
+    def evaluate(self, X_test, y_test):
+        # Evaluate on test
+        test_preds = self.pipeline.predict(X_test)
+        accuracy = np.mean(test_preds == y_test)
+
+        test_scores = self.pipeline.decision_function(X_test)
+        if test_scores.ndim == 1:
+            test_max = np.abs(test_scores)
+        else:
+            test_max = np.max(test_scores, axis=1)
+
+        test_preds_with_unknown = np.where(test_max < self.threshold, self.unknown_label, test_preds)
+
+        unknown_rate = np.mean(test_preds_with_unknown == self.unknown_label)
+        acc_with_unknown = np.mean(test_preds_with_unknown == y_test)  # on known-only test, unknown counts as wrong
+
+        self.logger.info("\n=== Final Performance ===")
+        self.logger.info(f"Test Accuracy(Without Unknown): {accuracy*100:.2f}%")
+        self.logger.info(f"Test Accuracy (unknown counts wrong): {acc_with_unknown*100:.2f}%")
+        self.logger.info(f"Test Unknown Rate: {unknown_rate*100:.2f}%")
+
+        return accuracy, acc_with_unknown, unknown_rate
